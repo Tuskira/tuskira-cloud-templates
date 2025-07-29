@@ -1,0 +1,179 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Creates a cross-account read-only IAM role with ExternalId and appends ECR
+  repository policies to allow pulling from an existing role in another account.
+  Includes:
+    - ReadOnlyAccess
+    - AWSSecurityHubReadOnlyAccess
+    - AmazonEC2ContainerRegistryReadOnly
+    - AmazonInspector2ReadOnlyAccess
+
+Resources:
+  ########################################################################
+  # 1. The Cross-Account Read-Only IAM Role (Target Account)
+  ########################################################################
+  CrossAccountReadOnlyRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: TuskiraCrossAccountReadOnlyRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: "arn:aws:iam::324037289929:role/tuskira-data-collection"
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: "tuskira20250401"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AWSSecurityHubReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonInspector2ReadOnlyAccess
+
+  ########################################################################
+  # 2. Lambda Execution Role for the Custom Resource
+  ########################################################################
+  ECRPolicyUpdaterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: ECRPolicyUpdaterRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Allows reading and setting ECR repository policies
+              - Effect: Allow
+                Action:
+                  - ecr:DescribeRepositories
+                  - ecr:GetRepositoryPolicy
+                  - ecr:SetRepositoryPolicy
+                Resource: "*"
+              # Allows writing logs
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  ########################################################################
+  # 3. Lambda Function to APPEND ECR Policy Statement
+  ########################################################################
+  ECRPolicyUpdaterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt ECRPolicyUpdaterRole.Arn
+      Timeout: 120
+      MemorySize: 512
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          from botocore.exceptions import ClientError
+
+          def handler(event, context):
+              """
+              This Lambda:
+                - Lists all ECR repositories in the region.
+                - For each repo, fetches its existing repository policy (if any).
+                - Appends (or updates) a statement allowing cross-account pull access.
+                - Sets the new merged policy back to the repo.
+              """
+              try:
+                  # Only handle 'Create' or 'Update' events. For 'Delete', just respond SUCCESS.
+                  if event['RequestType'] in ['Create', 'Update']:
+                      ecr_client = boto3.client('ecr')
+
+                      cross_account_principal = "arn:aws:iam::324037289929:role/tuskira-data-collection"
+                      statement_sid = "CrossAccountPullFromDataCollectionRole"
+
+                      # Policy statement to append
+                      new_statement = {
+                          "Sid": statement_sid,
+                          "Effect": "Allow",
+                          "Principal": {"AWS": cross_account_principal},
+                          "Action": [
+                              "ecr:BatchGetImage",
+                              "ecr:GetDownloadUrlForLayer",
+                              "ecr:DescribeImages",
+                              "ecr:ListImages",
+                              "ecr:BatchCheckLayerAvailability"
+                          ]
+                      }
+
+                      paginator = ecr_client.get_paginator('describe_repositories')
+                      for page in paginator.paginate():
+                          for repo in page['repositories']:
+                              repo_name = repo['repositoryName']
+                              print(f"Processing ECR repository: {repo_name}")
+
+                              # Try to retrieve existing policy
+                              try:
+                                  get_resp = ecr_client.get_repository_policy(repositoryName=repo_name)
+                                  existing_policy_text = get_resp['policyText']
+                                  policy_json = json.loads(existing_policy_text)
+                              except ClientError as e:
+                                  if e.response['Error']['Code'] == 'RepositoryPolicyNotFoundException':
+                                      # No existing policy
+                                      print(f"No existing policy for {repo_name}, creating fresh one.")
+                                      policy_json = {
+                                          "Version": "2012-10-17",
+                                          "Statement": []
+                                      }
+                                  else:
+                                      raise
+
+                              # Merge or update the statement
+                              updated = False
+                              for stmt in policy_json.get('Statement', []):
+                                  # If we already have a statement with the same 'Sid'
+                                  if stmt.get("Sid") == statement_sid:
+                                      print("Found existing statement with same Sid, updating it.")
+                                      stmt.update(new_statement)
+                                      updated = True
+                                      break
+
+                              # If not found, append it
+                              if not updated:
+                                  print("Appending new cross-account statement.")
+                                  policy_json['Statement'].append(new_statement)
+
+                              # Now set the updated policy
+                              ecr_client.set_repository_policy(
+                                  repositoryName=repo_name,
+                                  policyText=json.dumps(policy_json),
+                                  force=True
+                              )
+
+                  # Respond SUCCESS in all cases (including Delete).
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print(f"Error: {e}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+  ########################################################################
+  # 4. The Custom Resource that triggers the Lambda
+  ########################################################################
+  ECRPolicyUpdaterCR:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt ECRPolicyUpdaterFunction.Arn
+
+Outputs:
+  CrossAccountReadOnlyRoleArn:
+    Description: "ARN of the cross-account read-only role."
+    Value: !GetAtt CrossAccountReadOnlyRole.Arn

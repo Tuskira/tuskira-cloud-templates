@@ -1,0 +1,177 @@
+
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "containerAppEnvironmentName": {
+        "defaultValue": "",                   // Edit here
+        "type": "String",
+        "metadata": {
+          "description": "The name of the managed environment where the container app job will run."
+        }
+      },
+      "containerAppJobName": {
+        "defaultValue": "",                   // Edit here
+        "type": "String",
+        "metadata": {
+          "description": "The name of the container app job."
+        }
+      },
+      "imageUri": {
+        "type": "String",
+        "defaultValue": "docker.io/tuskiraai/tuskira-k8s-connector:1.7",
+        "metadata": {
+          "description": "The container image uri for the container app job."
+        }
+      },
+      "region": {
+        "defaultValue": "",                   // Edit here
+        "type": "String",
+        "metadata": {
+          "description": "Specifies the Azure region where the resources will be deployed."
+        }
+      },
+      "logAnalyticsId": {
+        "defaultValue": "",                   // Edit here
+        "type": "String",
+        "metadata": {
+          "description": "Id of the log analytics Workspace to be used by job"
+        }
+      },
+      "logAnalyticsSharedKey": {
+        "defaultValue": "",                   // Edit here
+        "type": "String",
+        "metadata": {
+          "description": "Shared key of the log analytics Workspace to be used by job"
+        }
+      },
+      "subnetId": {
+        "defaultValue": "",                   // Edit here
+        "type": "String",
+        "metadata": {
+          "description": "Subnet Id within the virtual network of which AKS cluster is part of"
+        }
+      }
+      "environmentVariables": {
+        "defaultValue": {
+          "SCRAPE_INTERVAL": "10m",
+          "PROVIDER": "AZURE",
+          "TUSKIRA_API_TOKEN": "",
+          "API_URL": "https://app.tuskira.ai/api/agent/v1/presigned"
+        },
+        "type": "Object",
+        "metadata": {
+          "description": "Environment variables for the App Job Container"
+        }
+      }
+    },
+    "resources": [
+      {
+        "type": "Microsoft.App/managedEnvironments",
+        "apiVersion": "2024-03-01",
+        "name": "[parameters('containerAppEnvironmentName')]",
+        "location": "[parameters('region')]",
+        "properties": {
+          "appLogsConfiguration": {
+            "destination": "log-analytics",
+            "logAnalyticsConfiguration": {
+              "customerId": "[parameters('logAnalyticsId')]",
+              "sharedKey": "[parameters('logAnalyticsSharedKey')]"
+            }
+          },
+          "vnetConfiguration": {
+            "internal": false,
+            "infrastructureSubnetId": "[parameters('subnetId')]"
+                    
+          },
+          "zoneRedundant": false,
+          "kedaConfiguration": {},
+          "daprConfiguration": {},
+          "customDomainConfiguration": {},
+          "workloadProfiles": [
+            {
+              "workloadProfileType": "Consumption",
+              "name": "Consumption"
+            }
+          ],
+          "peerAuthentication": {
+            "mtls": {
+              "enabled": false
+            }
+          },
+          "peerTrafficConfiguration": {
+            "encryption": {
+              "enabled": false
+            }
+          }
+        }
+      },
+      {
+        "type": "Microsoft.App/jobs",
+        "apiVersion": "2024-03-01",
+        "name": "[parameters('containerAppJobName')]",
+        "location": "[parameters('region')]",
+        "dependsOn": [
+          "[resourceId('Microsoft.App/managedEnvironments', parameters('containerAppEnvironmentName'))]"
+        ],
+        "identity": {
+          "type": "SystemAssigned"
+        },
+        "properties": {
+          "environmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('containerAppEnvironmentName'))]",
+          "configuration": {
+            "replicaTimeout": 1800,
+            "replicaRetryLimit": 0,
+            "triggerType": "Schedule",
+            "scheduleTriggerConfig": {
+              "replicaCompletionCount": 1,
+              "parallelism": 1,
+              "cronExpression": "0 */24 * * *"
+            }
+          },
+          "template": {
+            "containers": [
+              {
+                "image": "[parameters('imageUri')]",
+                "name": "job-container",
+                "env": [
+                  {
+                    "name": "PROVIDER",
+                    "value": "[parameters('environmentVariables').PROVIDER]"
+                  },
+                  {
+                    "name": "SUBSCRIPTION_ID",
+                    "value": "[subscription().subscriptionId]"
+                  },
+                  {
+                    "name": "TUSKIRA_API_TOKEN",
+                    "value": "[parameters('environmentVariables').TUSKIRA_API_TOKEN]"
+                  },
+                  {
+                    "name": "API_URL",
+                    "value": "[parameters('environmentVariables').API_URL]"
+                  }
+                ]
+              }
+            ],
+            "initContainers": null,
+            "volumes": null
+          },
+          "workloadProfileName": "Consumption"
+        }
+      },
+      {
+        "type": "Microsoft.Authorization/roleAssignments",
+        "apiVersion": "2022-04-01",
+        "name": "[guid(parameters('principalId'), subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '0ab0b1a8-8aac-4efd-b8c2-3ee1fb270be8'), resourceGroup().id)]",
+        "dependsOn": [
+          "[resourceId('Microsoft.App/jobs', parameters('containerAppJobName'))]"
+        ],
+        "properties": {
+          "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '0ab0b1a8-8aac-4efd-b8c2-3ee1fb270be8')]",
+          "principalId": "[reference(resourceId('Microsoft.App/jobs', parameters('containerAppJobName')), '2024-03-01', 'full').identity.principalId]",
+          "scope": "[resourceGroup().id]"
+        }
+      }
+    ]
+  }

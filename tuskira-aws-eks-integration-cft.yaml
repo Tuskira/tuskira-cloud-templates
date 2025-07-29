@@ -1,0 +1,103 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: EKS Access Entry Template
+
+Parameters:
+  LambdaName:
+    Type: String
+    Default: Tuskira-EKS-lambda
+    Description: Name of the Lambda function
+
+  Region:
+    Type: String
+    Default: <us-east-1>
+    Description: AWS Region where EKS clusters are deployed
+    ConstraintDescription: Must be a valid AWS region.
+
+  TuskiraAPIToken:
+    Type: String
+    Default: <tuskira-api-token>
+    Description: Api key token
+
+  EKSClusters:
+    Type: CommaDelimitedList
+    Default: <eks-clusters-list>
+    Description: List of EKS cluster where Lambda IAM role needs to be added
+
+  SecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Default: <"sg-abcdefgh,sg-hgfedcba">
+    Description: Security group ids for Lambda function
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: <"subnet-12345678,subnet-87654321">
+    Description: List of Subnet IDs for Lambda VPCConfig
+
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+        - arn:aws:iam::aws:policy/AmazonEKSServicePolicy
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                  - sts:GetCallerIdentity
+                  - eks:DescribeCluster
+                  - eks:ListClusters
+                  - eks:ListNodeGroups
+                  - eks:AccessKubernetesApi
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:InitiateLayerUpload
+                Resource: '*'
+
+  AccessEntry0: #Add a separate AccesEntry for each cluster you have mentioned in the clusters list under EKSClusters.
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      PrincipalArn: !GetAtt LambdaExecutionRole.Arn
+      ClusterName: <cluster1-name> #Include the cluster name from the clusters list defined under EKSClusters.
+      AccessPolicies:
+        - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+          AccessScope:
+            Type: cluster
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref LambdaName
+      Role: !GetAtt LambdaExecutionRole.Arn
+      PackageType: Image
+      Code:
+        ImageUri: 980921713307.dkr.ecr.us-east-1.amazonaws.com/connector-k8s-lambda:latest
+      MemorySize: 128
+      Timeout: 300
+      Environment:
+        Variables:
+          PROVIDER: AWS
+          REGION: !Ref Region
+          TUSKIRA_API_TOKEN: !Ref TuskiraAPIToken
+          API_URL: https://app.tuskira.ai/api/agent/v1/presigned
+          EKS_CLUSTERS: !Ref EKSClusters
+      VpcConfig:
+        SecurityGroupIds: !Ref SecurityGroupIds
+        SubnetIds: !Ref SubnetIds
