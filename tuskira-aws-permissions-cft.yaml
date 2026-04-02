@@ -2,11 +2,48 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Creates a cross-account read-only IAM role with ExternalId and appends ECR
   repository policies to allow pulling from an existing role in another account.
+  Deploy as a CloudFormation StackSet to target specific OUs and/or accounts.
   Includes:
     - ReadOnlyAccess
     - AWSSecurityHubReadOnlyAccess
     - AmazonEC2ContainerRegistryReadOnly
     - AmazonInspector2ReadOnlyAccess
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Role Configuration
+        Parameters:
+          - MemberRoleName
+          - ExternalId
+          - TuskiraSiteAccountId
+    ParameterLabels:
+      MemberRoleName:
+        default: Member Role Name
+      ExternalId:
+        default: Member Role External ID
+      TuskiraSiteAccountId:
+        default: Tuskira Site Account ID
+
+Parameters:
+  MemberRoleName:
+    Type: String
+    Default: TuskiraCrossAccountReadOnlyRole
+    Description: Name of the IAM role to create in each member account.
+
+  ExternalId:
+    Type: String
+    Description: External ID required for assuming this role (shared by Tuskira).
+    MinLength: 1
+
+  TuskiraSiteAccountId:
+    Type: String
+    Default: "324037289929"
+    Description: >
+      The AWS account ID where the tuskira-data-collection role lives (shared by Tuskira).
+    AllowedPattern: "^[0-9]{12}$"
+    ConstraintDescription: Must be a 12-digit AWS account ID.
 
 Resources:
   ########################################################################
@@ -16,17 +53,17 @@ Resources:
     Type: AWS::IAM::Role
     DeletionPolicy: Retain
     Properties:
-      RoleName: TuskiraCrossAccountReadOnlyRole
+      RoleName: !Ref MemberRoleName
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
-              AWS: "arn:aws:iam::324037289929:role/tuskira-data-collection"
+              AWS: !Sub "arn:aws:iam::${TuskiraSiteAccountId}:role/tuskira-data-collection"
             Action: sts:AssumeRole
             Condition:
               StringEquals:
-                sts:ExternalId: "tuskira20250401"
+                sts:ExternalId: !Ref ExternalId
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/ReadOnlyAccess
         - arn:aws:iam::aws:policy/AWSSecurityHubReadOnlyAccess
@@ -98,7 +135,8 @@ Resources:
                   if event['RequestType'] in ['Create', 'Update']:
                       ecr_client = boto3.client('ecr')
 
-                      cross_account_principal = "arn:aws:iam::324037289929:role/tuskira-data-collection"
+                      site_account_id = event['ResourceProperties']['TuskiraSiteAccountId']
+                      cross_account_principal = f"arn:aws:iam::{site_account_id}:role/tuskira-data-collection"
                       statement_sid = "CrossAccountPullFromDataCollectionRole"
 
                       # Policy statement to append
@@ -172,8 +210,13 @@ Resources:
     Type: AWS::CloudFormation::CustomResource
     Properties:
       ServiceToken: !GetAtt ECRPolicyUpdaterFunction.Arn
+      TuskiraSiteAccountId: !Ref TuskiraSiteAccountId
 
 Outputs:
   CrossAccountReadOnlyRoleArn:
     Description: "ARN of the cross-account read-only role."
     Value: !GetAtt CrossAccountReadOnlyRole.Arn
+
+  MemberRoleName:
+    Description: "Name of the created IAM role."
+    Value: !Ref MemberRoleName
